@@ -110,6 +110,10 @@ openssl-scanner scan /path/to/binary -o report.json
 # 扫描单个文件，输出 JSON
 ./scan source /path/to/openssl_client.c -o report.json
 
+# 使用 OpenSSL 全量接口 + 自定义接口扫描
+# interfaces.txt 每行一个接口名
+./scan source /path/to/src -o report.json --add interfaces.txt
+
 # 控制并行度
 ./scan source /path/to/src -o report.xlsx -j 4
 
@@ -184,6 +188,7 @@ XLSX 单工作表，含自动筛选：
 | `--exclude NAME` | 排除匹配的项目目录（子串匹配） | - |
 | `--json-only` | 输出合并 JSON 而非 XLSX | - |
 | `--no-recursive` | 不递归子目录 | - |
+| `--add FILE` | 在 OpenSSL 全量接口基础上追加自定义接口（TXT 每行一个） | - |
 
 ### 使用示例
 
@@ -193,6 +198,9 @@ XLSX 单工作表，含自动筛选：
 
 # JSON 输出（无需 openpyxl 依赖）
 ./scan combo-scan /path/to/opensource -o report.json --json-only
+
+# 探测和扫描 OpenSSL 全量接口 + 自定义接口
+./scan combo-scan /path/to/opensource -o report.xlsx --add interfaces.txt
 ```
 
 ### `-o` 自动识别
