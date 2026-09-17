@@ -262,12 +262,12 @@ Phase 3: 合并 (source-merge)
 
 ### 符号覆盖
 
-源码扫描使用内置的 **9544 个 OpenSSL 标识符**（ELF 导出符号 + 头文件宏）：
+源码扫描使用内置的 **10375 个 OpenSSL 标识符**（ELF 导出符号 + 头文件宏，去重后）：
 
 | 数据集 | 数量 | 来源 | 示例 |
 |--------|------|------|------|
-| ELF 导出符号 | 6248 | libcrypto.so + libssl.so | SSL_CTX_ctrl, EVP_DigestInit_ex |
-| 头文件宏 | 3298 | include/openssl/*.h | SSL_CTX_set_mode, OPENSSL_free, sk_X509_num |
+| ELF 导出符号 | 6485 | libcrypto.so + libssl.so | SSL_CTX_ctrl, EVP_DigestInit_ex |
+| 头文件宏 | 3892 | include/openssl/*.h | SSL_CTX_set_mode, OPENSSL_free, sk_X509_num |
 
 宏在编译时展开，不出现在 ELF 符号表中，但在源码中是真实的 API 调用点。
 
@@ -278,7 +278,7 @@ Phase 3: 合并 (source-merge)
 ./scan update-data \
     --openssl-lib /path/to/libcrypto.so \
     --header-dir /path/to/openssl/include/openssl \
-    --ossl-version 3.0.9
+    --ossl-version 3.5.9-dev
 
 # 仅更新符号
 ./scan update-data --openssl-lib /path/to/libcrypto.so
