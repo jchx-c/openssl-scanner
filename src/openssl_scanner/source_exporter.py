@@ -13,9 +13,11 @@ import os
 import re
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
+from .cca_compat import CCA_NO_ANALYSIS_CONCLUSION, is_custom_category
 from .source_analyzer import SourceScanResult
 
 if TYPE_CHECKING:
+    from .cca_compat import CCACompat
     from .hitls_compat import HiTLSCompat
 
 logger = logging.getLogger(__name__)
@@ -126,16 +128,20 @@ class SourceExcelExporter:
     """Export SourceScanResult to XLSX with call sites and symbol summary."""
 
     def export(self, result: SourceScanResult, output_path: str,
-               hitls_compat: Optional['HiTLSCompat'] = None) -> None:
+               hitls_compat: Optional['HiTLSCompat'] = None,
+               cca_compat: Optional['CCACompat'] = None) -> None:
         from . import _vendor  # noqa: F401
         from openpyxl import Workbook
         from openpyxl.styles import Font, PatternFill
 
         include_recovery = _has_fallback_sites(result)
-        cols = list(COLUMNS)
+        cols = list(COLUMNS[:6])
+        if cca_compat is not None:
+            cols.append(('cca_compat', 60, 'CCA Compatibility'))
         if hitls_compat is not None:
-            cols.insert(6, ('hitls_status', 15, 'HiTLS Status'))
-            cols.insert(7, ('hitls_equiv', 30, 'HiTLS Replacement'))
+            cols.append(('hitls_status', 15, 'HiTLS Status'))
+            cols.append(('hitls_equiv', 30, 'HiTLS Replacement'))
+        cols.extend(COLUMNS[6:])
         if include_recovery:
             cols.extend(RECOVERY_COLUMNS)
         last_col = chr(64 + len(cols)) if len(cols) <= 26 else 'A' + chr(64 + len(cols) - 26)
@@ -177,15 +183,23 @@ class SourceExcelExporter:
             ws.cell(row=row_idx, column=4, value=cs.line_number)
             ws.cell(row=row_idx, column=5, value=cs.ossl_symbol)
             ws.cell(row=row_idx, column=6, value=cs.category)
+            next_col = 7
+            if cca_compat is not None:
+                conclusion = None
+                if not is_custom_category(cs.category):
+                    conclusion = (
+                        cca_compat.conclusion_value(cs.ossl_symbol)
+                        or CCA_NO_ANALYSIS_CONCLUSION
+                    )
+                ws.cell(row=row_idx, column=next_col, value=conclusion)
+                next_col += 1
             if hitls_compat is not None:
                 h_status, h_equiv = hitls_compat.lookup(cs.ossl_symbol)
-                ws.cell(row=row_idx, column=7, value=h_status)
-                ws.cell(row=row_idx, column=8, value=h_equiv or '')
-                ws.cell(row=row_idx, column=9, value=cs.call_args)
-                next_col = 10
-            else:
-                ws.cell(row=row_idx, column=7, value=cs.call_args)
-                next_col = 8
+                ws.cell(row=row_idx, column=next_col, value=h_status)
+                ws.cell(row=row_idx, column=next_col + 1, value=h_equiv or '')
+                next_col += 2
+            ws.cell(row=row_idx, column=next_col, value=cs.call_args)
+            next_col += 1
             if include_recovery:
                 ws.cell(row=row_idx, column=next_col, value=cs.extraction_source)
                 ws.cell(row=row_idx, column=next_col + 1, value=cs.confidence)
@@ -205,12 +219,28 @@ class SourceExcelExporter:
 
         self._write_symbol_summary(wb, result, header_font, header_fill,
                                    hitls_compat=hitls_compat)
+        if cca_compat is not None:
+            cca_compat.write_summary_column(wb["Symbol Summary"])
         if hitls_compat is not None:
             _write_hitls_coverage_sheet(
                 wb, set(result.unique_symbols), header_font, hitls_compat,
             )
 
+        if cca_compat is not None:
+            excluded_symbols = {cs.ossl_symbol for cs in result.call_sites
+                                if is_custom_category(cs.category)}
+            products_by_symbol = {
+                symbol: {result.target} for symbol in result.unique_symbols
+            }
+            cca_compat.write_scan_conclusion(
+                wb, ((cs.ossl_symbol, cs.category) for cs in result.call_sites),
+            )
+            cca_compat.write_sheet(wb, result.unique_symbols,
+                                   excluded_symbols=excluded_symbols,
+                                   products_by_symbol=products_by_symbol)
         wb.save(output_path)
+        if cca_compat is not None:
+            cca_compat.export_codes(output_path)
         logger.info("XLSX report saved to: %s", output_path)
 
     def _write_symbol_summary(self, wb, result: SourceScanResult,
@@ -363,7 +393,8 @@ class SourceMergeExporter:
     """Merge multiple source scan XLSX reports into one multi-sheet workbook."""
 
     def merge(self, input_paths: List[str], output_path: str,
-              hitls_compat: Optional['HiTLSCompat'] = None) -> Dict:
+              hitls_compat: Optional['HiTLSCompat'] = None,
+              cca_compat: Optional['CCACompat'] = None) -> Dict:
         """Read XLSX reports and write a merged workbook.
 
         Returns:
@@ -373,20 +404,26 @@ class SourceMergeExporter:
         project_data = self._load_projects(input_paths, self._read_xlsx)
         for pdata, path in zip(project_data, input_paths):
             pdata['source'] = path
+            pdata['target'] = self._read_report_target(path)
         return self._merge_to_workbook(project_data, output_path,
-                                       hitls_compat=hitls_compat)
+                                       hitls_compat=hitls_compat,
+                                       cca_compat=cca_compat)
 
     def merge_from_json(self, input_paths: List[str],
                         output_path: str,
-                        hitls_compat: Optional['HiTLSCompat'] = None) -> Dict:
+                        hitls_compat: Optional['HiTLSCompat'] = None,
+                        cca_compat: Optional['CCACompat'] = None) -> Dict:
         """Read JSON reports and write a merged XLSX (or JSON) workbook.
 
         Unlike merge() which reads XLSX, this reads the faster JSON format
         and preserves total_files_scanned (not '--').
         """
         project_data = self._load_projects(input_paths, self._read_json)
+        for pdata, path in zip(project_data, input_paths):
+            pdata['target'] = self._read_report_target(path)
         return self._merge_to_workbook(project_data, output_path,
-                                       hitls_compat=hitls_compat)
+                                       hitls_compat=hitls_compat,
+                                       cca_compat=cca_compat)
 
     def _load_projects(self, input_paths, reader):
         """Load project data from input files using the given reader.
@@ -405,7 +442,8 @@ class SourceMergeExporter:
 
     def _merge_to_workbook(self, project_data: List[Dict],
                            output_path: str,
-                           hitls_compat: Optional['HiTLSCompat'] = None) -> Dict:
+                           hitls_compat: Optional['HiTLSCompat'] = None,
+                           cca_compat: Optional['CCACompat'] = None) -> Dict:
         """Shared implementation for all XLSX merge paths.
 
         Args:
@@ -440,6 +478,7 @@ class SourceMergeExporter:
         stats = []
         all_symbols = set()
         all_rows: List[List] = []
+        products_by_symbol: Dict[str, set] = {}
         has_files_scanned = any(
             p['files_scanned'] != '--' for p in project_data)
 
@@ -457,7 +496,12 @@ class SourceMergeExporter:
             sheet_name = names[idx]
             rows = pdata['rows']
             files_scanned = pdata['files_scanned']
-            project_columns = _row_columns(rows)
+            target = pdata.get('target', '')
+            project_columns = list(_row_columns(rows))
+            if cca_compat is not None:
+                project_columns.insert(
+                    6, ('cca_compat', 60, 'CCA Compatibility'),
+                )
 
             ws_first = wb.create_sheet(title=sheet_name)
             _init_project_sheet(ws_first, project_columns)
@@ -472,7 +516,19 @@ class SourceMergeExporter:
                     ws = wb.create_sheet(title=overflow_name)
                     _init_project_sheet(ws, project_columns)
                     row_idx = 2
-                for col_idx, value in enumerate(row_data, 1):
+                output_row = row_data
+                if cca_compat is not None:
+                    conclusion = None
+                    if not is_custom_category(row_data[5]):
+                        conclusion = (
+                            cca_compat.conclusion_value(row_data[4])
+                            or CCA_NO_ANALYSIS_CONCLUSION
+                        )
+                    output_row = (
+                        list(row_data[:6]) + [conclusion]
+                        + list(row_data[6:])
+                    )
+                for col_idx, value in enumerate(output_row, 1):
                     ws.cell(row=row_idx, column=col_idx, value=value)
                 row_idx += 1
 
@@ -498,6 +554,8 @@ class SourceMergeExporter:
                 files_with_calls.add(row[0])
                 all_rows.append(list(row) + [sheet_name])
                 all_symbols.add(row[4])
+                if target:
+                    products_by_symbol.setdefault(row[4], set()).add(target)
 
             info = {
                 'project': sheet_name,
@@ -538,12 +596,24 @@ class SourceMergeExporter:
         self._write_symbol_summary_from_rows(
             wb, "Symbol Summary", all_rows, header_font, header_fill,
             hitls_compat=hitls_compat)
+        if cca_compat is not None:
+            cca_compat.write_summary_column(wb["Symbol Summary"])
         if hitls_compat is not None:
             _write_hitls_coverage_sheet(
                 wb, all_symbols, header_font, hitls_compat,
             )
 
+        if cca_compat is not None:
+            excluded_symbols = {row[4] for row in all_rows if is_custom_category(row[5])}
+            cca_compat.write_scan_conclusion(
+                wb, ((row[4], row[5]) for row in all_rows),
+            )
+            cca_compat.write_sheet(wb, all_symbols,
+                                   excluded_symbols=excluded_symbols,
+                                   products_by_symbol=products_by_symbol)
         wb.save(output_path)
+        if cca_compat is not None:
+            cca_compat.export_codes(output_path)
         logger.info("Merged XLSX report saved to: %s", output_path)
         return {'sheets': stats, 'total_symbols': len(all_symbols)}
 
@@ -622,6 +692,21 @@ class SourceMergeExporter:
 
         name = os.path.splitext(os.path.basename(path))[0]
         return name, files_scanned, rows
+
+    @staticmethod
+    def _read_report_target(path: str) -> str:
+        json_path = (
+            path if path.lower().endswith('.json')
+            else os.path.splitext(path)[0] + '.json'
+        )
+        if not os.path.isfile(json_path):
+            return ''
+        try:
+            with open(json_path, encoding='utf-8') as source:
+                meta = json.load(source).get('meta', {})
+        except (OSError, ValueError, AttributeError):
+            return ''
+        return str(meta.get('target') or meta.get('scan_root') or '')
 
     def _resolve_sheet_names(self, names: List[str]) -> List[str]:
         """Ensure unique sheet names within Excel's 31-char limit."""
@@ -744,6 +829,7 @@ class SourceMergeExporter:
                 'name': name,
                 'files_scanned': result.total_files_scanned,
                 'rows': rows,
+                'target': result.target,
             })
         return self._merge_to_workbook(project_data, output_path,
                                        hitls_compat=hitls_compat)
